@@ -31,13 +31,22 @@ from pyspark.sql.types import (
 spark = (
     SparkSession.builder
     .appName("CryptoStreamProcessor")
-    .master("local[*]")              # lokal mod, tüm CPU çekirdeklerini kullan
+    .master("local[2]")              # 2 çekirdek yeter (dk'da ~10K mesaj); local[*] makineyi kastırıyor
+    .config("spark.driver.memory", "1g")    # JVM'i 1 GB ile sınırla
     .config("spark.jars.packages",
             "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.6")  # Kafka connector
     # Windows'ta state store commit'in .crc hatası vermesini önler (checksum'sız FS)
     .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
+    # Checkpoint log'u varsayılan olarak FileContext API'sinden (ChecksumFs) geçer ve
+    # yukarıdaki ayarı görmez → Windows'ta .crc rename hatası "CONCURRENT_STREAM_LOG_UPDATE"
+    # olarak patlar. FileSystem tabanlı yöneticiye zorlayınca o da Raw FS'i kullanır.
+    .config("spark.sql.streaming.checkpointFileManagerClass",
+            "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager")
     # lokal modda 200 shuffle partition gereksiz; küçük tutmak daha hızlı
     .config("spark.sql.shuffle.partitions", "4")
+    # Binance timestamp'i UTC epoch; oturumu UTC'ye sabitleyince event_time ve
+    # pencere sınırları da UTC olur (aksi halde makinenin saat dilimi karışır)
+    .config("spark.sql.session.timeZone", "UTC")
     .getOrCreate()
 )
 
@@ -102,17 +111,68 @@ windowed = (
     )
 )
 
-# ---------- 6. Sonucu ekrana yaz (test için) ----------
+# ---------- 6. PostgreSQL'e yaz (foreachBatch + upsert) ----------
+# Spark'ın hazır JDBC yazıcısı sadece INSERT/overwrite bilir, "varsa güncelle"
+# (upsert) yapamaz. outputMode("update") ile aynı pencere birkaç kez gelir
+# (dakika dolana kadar sayılar güncellenir) → bu yüzden upsert şart.
+# Çözüm: her mikro-batch'i Python'a alıp psycopg2 ile ON CONFLICT ... DO UPDATE.
+import psycopg2
+from psycopg2.extras import execute_values
+from datetime import timezone
+
+
+def _utc(dt):
+    """PySpark collect() timestamp'leri makinenin yerel saatinde *naive* datetime olarak
+    verir (session.timeZone=UTC olsa bile). Naive değeri psycopg2'ye verirsek Postgres
+    onu UTC sanır → 3 saat kayma. astimezone() naive'i yerel saat kabul edip UTC'ye çevirir."""
+    return dt.astimezone(timezone.utc)
+
+PG_DSN = "host=localhost port=5432 dbname=crypto user=crypto password=crypto"
+
+UPSERT_SQL = """
+    INSERT INTO price_windows
+        (window_start, window_end, symbol, avg_price, min_price, max_price,
+         trade_count, total_volume, updated_at)
+    VALUES %s
+    ON CONFLICT (window_start, symbol) DO UPDATE SET
+        window_end   = EXCLUDED.window_end,
+        avg_price    = EXCLUDED.avg_price,
+        min_price    = EXCLUDED.min_price,
+        max_price    = EXCLUDED.max_price,
+        trade_count  = EXCLUDED.trade_count,
+        total_volume = EXCLUDED.total_volume,
+        updated_at   = now()
+"""
+
+
+def write_to_postgres(batch_df, batch_id):
+    """Her trigger'da (30 sn) Spark bu fonksiyonu 1 kez çağırır.
+    batch_df: o anda değişen pencere satırları (genelde 1-3 satır)."""
+    rows = [
+        (_utc(r.window_start), _utc(r.window_end), r.symbol, r.avg_price, r.min_price,
+         r.max_price, r.trade_count, r.total_volume)
+        for r in batch_df.collect()          # satır sayısı küçük → driver'a çekmek güvenli
+    ]
+    if not rows:
+        return
+    with psycopg2.connect(PG_DSN) as conn, conn.cursor() as cur:
+        execute_values(
+            cur, UPSERT_SQL, rows,
+            template="(%s, %s, %s, %s, %s, %s, %s, %s, now())",  # updated_at DB'de üretilir
+        )
+    print(f"[batch {batch_id}] {len(rows)} pencere satırı Postgres'e yazıldı", flush=True)
+
+
 query = (
     windowed.writeStream
-    .outputMode("update")           # pencere güncellenince yaz
-    .format("console")              # şimdilik ekrana yaz (sonra DB'ye)
-    .option("truncate", False)      # uzun satırları kesme
-    .trigger(processingTime="30 seconds")  # 30 saniyede bir güncelle
+    .outputMode("update")                  # pencere güncellenince tekrar gönder
+    .foreachBatch(write_to_postgres)       # console yerine kendi fonksiyonumuz
+    .option("checkpointLocation", "checkpoint/price_windows")  # kaldığı yeri hatırlasın
+    .trigger(processingTime="30 seconds")  # 30 saniyede bir
     .start()
 )
 
-print("Spark consumer başladı, Kafka'dan okuyup 1dk pencereler oluşturuyor...")
+print("Spark consumer başladı: Kafka -> 1dk pencere -> PostgreSQL (price_windows)")
 print("Durdurmak için Ctrl+C")
 
 query.awaitTermination()
