@@ -16,3 +16,19 @@ CREATE TABLE IF NOT EXISTS price_windows (
     updated_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),  -- son upsert zamanı
     PRIMARY KEY (window_start, symbol)
 );
+
+-- Spark'ın z-skor anomali tespiti (consumer/alerts.py) sonuçları.
+-- Aynı DDL consumer açılışında da CREATE IF NOT EXISTS ile koşar (eski volume'lar için).
+CREATE TABLE IF NOT EXISTS alerts (
+    id           BIGSERIAL PRIMARY KEY,
+    window_start TIMESTAMPTZ      NOT NULL,   -- uyarıya konu 1 dk pencere (UTC)
+    symbol       TEXT             NOT NULL,
+    kind         TEXT             NOT NULL,   -- ret_pct | volume_usd | trade_count
+    value        DOUBLE PRECISION NOT NULL,   -- o dakikadaki değer
+    baseline     DOUBLE PRECISION NOT NULL,   -- önceki N dk ortalaması
+    sigma        DOUBLE PRECISION NOT NULL,   -- önceki N dk standart sapması
+    z            DOUBLE PRECISION NOT NULL,   -- (value - baseline) / sigma
+    avg_price    DOUBLE PRECISION,
+    detected_at  TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    UNIQUE (window_start, symbol, kind)
+);

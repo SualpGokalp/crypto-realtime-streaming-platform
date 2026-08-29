@@ -19,6 +19,14 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Kafka varsayilan olarak /tmp/kafka-logs'a yazar (konteyner silinince gider).
+      # Veri dizinini asagidaki volume'a yonlendiriyoruz: topic verisi ve offset'ler
+      # konteyner yeniden yaratilsa da kalir.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # JVM bellegi: varsayilan 1 GB, lokal tek broker icin 512 MB yeter (makine 15 GB, dolu)
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest

@@ -59,6 +59,10 @@ raw_stream = (
     .option("kafka.bootstrap.servers", "localhost:9094")
     .option("subscribe", "crypto-prices")
     .option("startingOffsets", "latest")       # sadece yeni mesajları al
+    # Checkpoint'teki offset Kafka'da artık yoksa (retention sildi / broker sıfırlandı)
+    # varsayılan davranış sorguyu hata ile durdurmak; lokal projede kaldığı yerden
+    # devam etmesi yeterli.
+    .option("failOnDataLoss", "false")
     .load()
 )
 
@@ -172,7 +176,49 @@ query = (
     .start()
 )
 
+# ---------- 7. Anomali tespiti → Kafka `crypto-alerts` + Postgres `alerts` ----------
+# Aynı `windowed` DataFrame'i İKİNCİ bir sorguyla, bu kez outputMode("append") ile
+# dinliyoruz. Farkı:
+#   update → pencere her değiştiğinde (dakika dolmadan, yarım sayılarla) satır gelir.
+#   append → pencere ancak KESİNLEŞİNCE gelir: watermark (max event_time − 30 sn)
+#            pencere sonunu geçtiğinde, yani ~30-60 sn gecikmeyle, tek sefer.
+# Z-skoru yarım pencereye uygulasak "işlem sayısı düştü" diye sahte alarm üretirdik;
+# bu yüzden anomali sorgusu append modunda çalışır. Hesabın kendisi consumer/alerts.py'de.
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # hangi klasörden çalıştırılırsa çalıştırılsın
+import alerts
+
+alerts.ensure_table()   # eski Postgres volume'unda `alerts` tablosu yoksa oluştur
+
+
+def detect_anomalies(batch_df, batch_id):
+    """Kesinleşen pencereler (genelde sembol başına 1 satır) → z-skor → uyarı."""
+    rows = [
+        r.asDict() | {"window_start": _utc(r.window_start)}   # Spark naive ts → UTC aware
+        for r in batch_df.collect()
+    ]
+    if not rows:
+        return
+    from types import SimpleNamespace
+    found = alerts.detect([SimpleNamespace(**r) for r in rows])
+    for a in found:
+        print(f"[alert] {a['window_start']:%H:%M} {a['symbol']} {a['label']} "
+              f"z={a['z']:+.1f} (değer {a['value']:,.3f}, ort {a['baseline']:,.3f})", flush=True)
+    print(f"[batch {batch_id}] {len(rows)} kesin pencere incelendi, {len(found)} uyarı", flush=True)
+
+
+alert_query = (
+    windowed.writeStream
+    .outputMode("append")                  # yalnızca kesinleşmiş pencereler
+    .foreachBatch(detect_anomalies)
+    .option("checkpointLocation", "checkpoint/alerts")   # ayrı sorgu = ayrı checkpoint
+    .trigger(processingTime="30 seconds")
+    .start()
+)
+
 print("Spark consumer başladı: Kafka -> 1dk pencere -> PostgreSQL (price_windows)")
+print(f"Anomali sorgusu açık: |z| >= {alerts.Z_THRESHOLD} -> Kafka '{alerts.ALERT_TOPIC}' + Postgres 'alerts'")
 print("Durdurmak için Ctrl+C")
 
-query.awaitTermination()
+# İki sorgu aynı SparkSession'da paralel koşar; biri hata verirse program kapansın.
+spark.streams.awaitAnyTermination()
