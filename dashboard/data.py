@@ -6,26 +6,35 @@ fonksiyonlar cache'lidir; TTL'ler Spark'ın yazma temposuna (30 sn) göre seçil
 """
 import numpy as np
 import pandas as pd
-import psycopg2
 import streamlit as st
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import ProgrammingError
 
-PG_DSN = "host=localhost port=5432 dbname=crypto user=crypto password=crypto"
+PG_DSN = "host=localhost port=5432 dbname=crypto user=crypto password=crypto"   # sağlık kontrolü kullanır
+PG_URL = "postgresql+psycopg2://crypto:crypto@localhost:5432/crypto"
 TZ = "Europe/Istanbul"
+
+
+@st.cache_resource
+def _engine():
+    """Tek SQLAlchemy engine, süreç boyunca yaşar (bağlantı havuzuyla).
+    pandas.read_sql'e ham psycopg2 bağlantısı vermek her sorguda
+    'pandas only supports SQLAlchemy connectable' uyarısı bastırıyordu."""
+    return create_engine(PG_URL, pool_pre_ping=True)
 
 
 @st.cache_data(ttl=10)
 def load(minutes: int) -> pd.DataFrame:
-    with psycopg2.connect(PG_DSN) as conn:
-        df = pd.read_sql(
-            """
+    df = pd.read_sql(
+        text("""
             SELECT window_start, symbol, avg_price, min_price, max_price,
                    trade_count, total_volume, updated_at
             FROM price_windows
-            WHERE window_start >= now() - (%s || ' minutes')::interval
+            WHERE window_start >= now() - (:m || ' minutes')::interval
             ORDER BY symbol, window_start
-            """,
-            conn, params=(minutes,),
-        )
+        """),
+        _engine(), params={"m": minutes},
+    )
     df["t"] = df["window_start"].dt.tz_convert(TZ)   # görüntüleme için TR saati
     return df
 
@@ -33,28 +42,26 @@ def load(minutes: int) -> pd.DataFrame:
 @st.cache_data(ttl=10)
 def load_alerts(minutes: int) -> pd.DataFrame:
     """Spark'ın akış içinde ürettiği uyarılar (consumer/alerts.py → alerts tablosu)."""
-    with psycopg2.connect(PG_DSN) as conn:
-        try:
-            return pd.read_sql(
-                """
+    try:
+        return pd.read_sql(
+            text("""
                 SELECT window_start, symbol, kind, value, baseline, sigma, z, avg_price, detected_at
                 FROM alerts
-                WHERE window_start >= now() - (%s || ' minutes')::interval
+                WHERE window_start >= now() - (:m || ' minutes')::interval
                 ORDER BY window_start DESC, symbol
-                """,
-                conn, params=(minutes,),
-            )
-        except psycopg2.errors.UndefinedTable:      # consumer hiç yeni sürümle açılmadıysa tablo yoktur
-            return pd.DataFrame()
+            """),
+            _engine(), params={"m": minutes},
+        )
+    except ProgrammingError:      # consumer hiç yeni sürümle açılmadıysa tablo yoktur
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
 def load_profile() -> pd.DataFrame:
     """Günün saatine göre aktivite profili: son 7 günün tüm pencereleri, TR saatiyle
     saat başına ortalama işlem sayısı ve $ hacim. Seçili aralıktan bağımsız (daha uzun)."""
-    with psycopg2.connect(PG_DSN) as conn:
-        return pd.read_sql(
-            """
+    return pd.read_sql(
+        text("""
             SELECT symbol,
                    EXTRACT(HOUR FROM window_start AT TIME ZONE 'Europe/Istanbul')::int AS hour,
                    AVG(trade_count)             AS trades,
@@ -64,9 +71,9 @@ def load_profile() -> pd.DataFrame:
             WHERE window_start >= now() - interval '7 days'
             GROUP BY 1, 2
             ORDER BY 1, 2
-            """,
-            conn,
-        )
+        """),
+        _engine(),
+    )
 
 
 @st.cache_data(ttl=10)
