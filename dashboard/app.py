@@ -711,13 +711,20 @@ görürsün. Uzun süre 0'a dönememek zayıflık; sık sık 0'a dokunmak güçl
         pairs = [(a, b) for i, a in enumerate(symbols) for b in symbols[i + 1:] if a in piv and b in piv]
         fig = go.Figure()
         # çift rengi: çiftin BTC olmayan üyesi (BTC-ETH → ETH rengi, BTC-SOL → SOL, ETH-SOL → gri)
+        rc_all = []
         for a, b in pairs:
             rc = piv[a].rolling(30, min_periods=10).corr(piv[b])
+            rc_all.append(rc)
             rcdf = pd.DataFrame({"t": piv.index.tz_convert(TZ), "rc": rc.values})
             color = COLORS[b] if a == "BTCUSDT" else MUTED
             line(fig, rcdf, "rc", f"{a[:3]}–{b[:3]}", color, fmt=".2f")
-        fig.add_hline(y=0, line=dict(color=MUTED, width=1))
-        fig.update_yaxes(range=[-1, 1])
+        # Eksen veriye göre daralır: korelasyon çoğu zaman 0.7-1.0 bandında gezer,
+        # sabit -1..+1 ekseninde çizgiler tavana yapışıp okunmaz oluyordu.
+        lo = float(np.nanmin(pd.concat(rc_all))) if rc_all else -1.0
+        ylo = max(-1.05, lo - 0.08)
+        if ylo <= 0:
+            fig.add_hline(y=0, line=dict(color=MUTED, width=1))
+        fig.update_yaxes(range=[ylo, 1.03])
         st.plotly_chart(layout(fig, "korelasyon", height=280), width="stretch", config=PLOTLY_CFG)
         explain("Hareketli korelasyon", """
 **Formül:** her dakika için, son 30 dakikanın getirileri üzerinden Pearson korelasyonu.
@@ -757,8 +764,13 @@ sık), daha düşükse sakin. Dağılım sağa/sola kaymışsa aralık boyunca y
 
     # --- 4) Hareket–hacim ilişkisi ---
     st.subheader("Hareket ne kadar hacimle desteklendi? — dakikalık getiri vs $ hacim")
+    # Coin seçimi grafiğin efsanesinden değil buradan: efsane tıklamaları 30 sn'lik
+    # oto-yenilemede sıfırlanıyordu; `key`'li pills seçimi session_state'te kalıcıdır.
+    sc_syms = st.pills("Gösterilen coinler", symbols, selection_mode="multi",
+                       default=symbols, key="scatter_syms",
+                       help="Seçim otomatik yenilemede korunur") or symbols
     fig = go.Figure()
-    for sym in symbols:
+    for sym in sc_syms:
         gg = df[df.symbol == sym].dropna(subset=["ret_pct", "volume_usd"])
         fig.add_trace(go.Scatter(
             x=gg["volume_usd"], y=gg["ret_pct"], mode="markers", name=sym,
@@ -766,8 +778,10 @@ sık), daha düşükse sakin. Dağılım sağa/sola kaymışsa aralık boyunca y
             customdata=gg["t"].dt.strftime("%d.%m %H:%M"),
             hovertemplate="%{customdata}<br>hacim $%{x:,.0f}<br>getiri %{y:+.3f}%<extra>" + sym + "</extra>"))
     if not al.empty:
-        ap = al[al.kind == "ret_pct"].merge(df[["window_start", "symbol", "ret_pct", "volume_usd"]],
-                                           on=["window_start", "symbol"], how="inner")
+        # uyarı halkaları da seçime uyar: yalnız gösterilen coin'lerin uyarıları çizilir
+        ap = al[(al.kind == "ret_pct") & (al.symbol.isin(sc_syms))].merge(
+            df[["window_start", "symbol", "ret_pct", "volume_usd"]],
+            on=["window_start", "symbol"], how="inner")
         if not ap.empty:
             fig.add_trace(go.Scatter(
                 x=ap["volume_usd"], y=ap["ret_pct"], mode="markers", name="Spark fiyat uyarısı",
