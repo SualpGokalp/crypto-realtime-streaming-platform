@@ -30,21 +30,28 @@ _LOG_TAIL_BYTES = 262_144   # dev log dosyasının tamamını okuma; son ~256 KB
 
 
 def _read_log(path: Path) -> list[str]:
-    """Tee-Object UTF-16 (BOM'lu) yazar, python düz UTF-8; ikisini de okur.
+    """Log dosyalarının kodlaması karışık olabilir: Tee-Object UTF-16 yazar,
+    python/Spark düz UTF-8 — aynı dosyada ikisi bir arada bile görülür (append).
+    Çözüm: BOM varsa UTF-16; yoksa UTF-8 çöz ve UTF-16'dan kalan NUL baytlarını
+    ayıkla (UTF-16'da ASCII = harf + NUL; NUL'lar atılınca metin okunur olur).
     Yalnızca dosyanın sonu okunur — milyon satırlık eski loglar paneli kilitlemesin."""
     size = path.stat().st_size
     with path.open("rb") as f:
         head = f.read(2)
-        enc = "utf-16-le" if head == b"\xff\xfe" else ("utf-16-be" if head == b"\xfe\xff" else "utf-8")
         if size > _LOG_TAIL_BYTES:
-            off = size - _LOG_TAIL_BYTES
-            if enc.startswith("utf-16"):
-                off -= off % 2          # utf-16'da karakter ortasından bölmemek için çift hizala
+            off = (size - _LOG_TAIL_BYTES) & ~1     # utf-16 ihtimaline karşı çift hizala
             f.seek(off)
-            lines = f.read().decode(enc, errors="replace").splitlines()
-            return lines[1:]            # ilk satır büyük ihtimalle ortadan kesildi, at
-        f.seek(0 if enc == "utf-8" else 2)
-        return f.read().decode(enc, errors="replace").splitlines()
+            data = f.read()
+            cut = 1                                  # ilk satır ortadan kesilmiş olabilir
+        else:
+            f.seek(0)
+            data = f.read()
+            cut = 0
+    if head in (b"\xff\xfe", b"\xfe\xff") and cut == 0:
+        txt = data.decode("utf-16", errors="replace")
+    else:
+        txt = data.decode("utf-8", errors="replace").replace("\x00", "")
+    return txt.splitlines()[cut:]
 
 
 def render(raw: pd.DataFrame) -> None:
@@ -153,9 +160,16 @@ penceresi açık görünürken Spark içeride heartbeat timeout ile çökmüşt�
         except OSError as e:
             st.warning(f"{lf.name} okunamadı: {e}")
             continue
-        errs = [l.strip() for l in lines if pat.search(l) and not noise.search(l)]
+        # Bekçi script'i her (yeniden) başlatmada log'a işaret bırakır. Eski
+        # çalıştırmanın hataları (çökme → bekçi toparladı) güncel durumu
+        # yansıtmaz; yalnızca SON başlatmadan sonraki satırlar sayılır.
+        marks = [i for i, l in enumerate(lines) if "bekci:" in l and "baslatiliyor" in l]
+        cur = lines[marks[-1]:] if marks else lines
+        errs = [l.strip() for l in cur if pat.search(l) and not noise.search(l)]
+        old_n = sum(1 for l in lines[:marks[-1]] if pat.search(l) and not noise.search(l)) if marks else 0
         icon = "🔴" if errs else "🟢"
-        with st.expander(f"{icon} {lf.name} — {len(errs)} hata satırı · son yazma {mtime:%d.%m %H:%M} · {len(lines):,} satır"):
+        extra = f" · önceki çalıştırmalarda {old_n} (bekçi toparladı)" if old_n else ""
+        with st.expander(f"{icon} {lf.name} — {len(errs)} hata satırı{extra} · son yazma {mtime:%d.%m %H:%M} · {len(lines):,} satır"):
             if errs:
                 st.code("\n".join(errs[-15:]), language="text")
                 st.caption("Son 15 hata satırı. Tam bağlam için dosyayı aç: " + str(lf))
