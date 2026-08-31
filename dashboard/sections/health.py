@@ -26,11 +26,25 @@ def _port_open(port: int) -> bool:
         return False
 
 
+_LOG_TAIL_BYTES = 262_144   # dev log dosyasının tamamını okuma; son ~256 KB yeter
+
+
 def _read_log(path: Path) -> list[str]:
-    """Tee-Object UTF-16 (BOM'lu) yazar, python düz UTF-8; ikisini de okur."""
-    bts = path.read_bytes()
-    enc = "utf-16" if bts[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8"
-    return bts.decode(enc, errors="replace").splitlines()
+    """Tee-Object UTF-16 (BOM'lu) yazar, python düz UTF-8; ikisini de okur.
+    Yalnızca dosyanın sonu okunur — milyon satırlık eski loglar paneli kilitlemesin."""
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        head = f.read(2)
+        enc = "utf-16-le" if head == b"\xff\xfe" else ("utf-16-be" if head == b"\xfe\xff" else "utf-8")
+        if size > _LOG_TAIL_BYTES:
+            off = size - _LOG_TAIL_BYTES
+            if enc.startswith("utf-16"):
+                off -= off % 2          # utf-16'da karakter ortasından bölmemek için çift hizala
+            f.seek(off)
+            lines = f.read().decode(enc, errors="replace").splitlines()
+            return lines[1:]            # ilk satır büyük ihtimalle ortadan kesildi, at
+        f.seek(0 if enc == "utf-8" else 2)
+        return f.read().decode(enc, errors="replace").splitlines()
 
 
 def render(raw: pd.DataFrame) -> None:
@@ -58,8 +72,11 @@ def render(raw: pd.DataFrame) -> None:
     if kafka_up:
         try:
             from kafka import KafkaConsumer, TopicPartition
+            # request_timeout_ms, kütüphane kuralı gereği session_timeout_ms'ten
+            # (varsayılan 10000) BÜYÜK olmalı; kafka-python 2.2'nin Consumer'ı
+            # api_version_auto_timeout_ms parametresini tanımaz (Unrecognized configs)
             kc = KafkaConsumer(bootstrap_servers="localhost:9094",
-                               request_timeout_ms=4000, api_version_auto_timeout_ms=4000)
+                               request_timeout_ms=11000)
             parts = kc.partitions_for_topic("crypto-prices") or set()
             tps = [TopicPartition("crypto-prices", p) for p in parts]
             total = sum(kc.end_offsets(tps).values()) if tps else 0
@@ -122,6 +139,9 @@ penceresi açık görünürken Spark içeride heartbeat timeout ile çökmüşt�
     st.subheader("Log dosyalarındaki hatalar")
     log_dir = Path(__file__).resolve().parents[2] / "logs"
     pat = re.compile(r"ERROR|Exception|Traceback|CRITICAL|Py4JJavaError|ConnectionRefused", re.I)
+    # PowerShell'in Tee-Object'i stderr satırlarını "NativeCommandError/RemoteException"
+    # süslemesiyle sarar — bunlar gerçek hata değil, kabuk gürültüsüdür; eleriz
+    noise = re.compile(r"NativeCommandError|RemoteException|CategoryInfo|FullyQualifiedErrorId|^\s*\+")
     logs = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True) if log_dir.exists() else []
     if not logs:
         st.info("`logs/` klasöründe dosya yok. Producer/consumer'ı log tutarak başlatırsan "
@@ -133,7 +153,7 @@ penceresi açık görünürken Spark içeride heartbeat timeout ile çökmüşt�
         except OSError as e:
             st.warning(f"{lf.name} okunamadı: {e}")
             continue
-        errs = [l.strip() for l in lines if pat.search(l)]
+        errs = [l.strip() for l in lines if pat.search(l) and not noise.search(l)]
         icon = "🔴" if errs else "🟢"
         with st.expander(f"{icon} {lf.name} — {len(errs)} hata satırı · son yazma {mtime:%d.%m %H:%M} · {len(lines):,} satır"):
             if errs:
