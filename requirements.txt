@@ -6,3 +6,4 @@ streamlit==1.62.0
 streamlit-autorefresh==1.0.1
 pandas==3.0.5
 plotly==7.0.0
+scikit-learn==1.9.0
