@@ -19,7 +19,7 @@ Binance WebSocket ──► Kafka ──► Spark Structured Streaming ──┬
 | Şema | `db/init.sql` | `price_windows` (pencere sonuçları) ve `alerts` (uyarılar) tabloları. Volume ilk oluşturulurken çalışır. |
 | Consumer | `consumer/spark_consumer.py` | Kafka'dan okur, event-time üzerinden 1 dk pencerede `avg/min/max/count/sum` hesaplar. **Sorgu 1 (`update`)**: pencere her değiştiğinde `foreachBatch` + psycopg2 ile Postgres'e *upsert*. **Sorgu 2 (`append`)**: pencere kesinleşince anomali kontrolü. |
 | Anomali | `consumer/alerts.py` | Kesinleşen pencereyi önceki 30 dakikayla karşılaştırır: getiri %, işlem sayısı, dolar hacmi için `z = (x − ort) / σ`. `|z| ≥ 2` → Kafka `crypto-alerts` (key = sembol) + Postgres `alerts`. |
-| Panel | `dashboard/app.py` | Endeks, korelasyon, SMA/EMA/VWAP, Bollinger, oynaklık, hacim, z-skor tablosu ve Spark uyarıları; her grafiğin altında hesap açıklaması. |
+| Panel | `dashboard/` | Modüler Streamlit paneli: `app.py` giriş + yönlendirme; `theme.py` palet, `data.py` sorgular/göstergeler, `charts.py` grafik yardımcıları; bölümler `sections/` altında (genel bakış, sembol detay, derin analiz, anomaliler, Isolation Forest ML anomali, sağlık kontrolü). Her grafiğin altında hesap açıklaması. Testler: `tests/test_sections.py`. |
 
 ## Neden iki Spark sorgusu?
 
