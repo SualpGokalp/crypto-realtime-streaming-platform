@@ -31,6 +31,28 @@ MUTED = "#6f6e69" if DARK else "#9a9892"      # yardımcı çizgiler (SMA, bant)
 POS = "#0ca30c"                                # durum: iyi / pozitif
 NEG = "#d03b3b"                                # durum: kritik / negatif
 WARN = "#fab219"                               # durum: uyarı (anomali işareti)
+# diverging (kutuplu) skala: korelasyon gibi -1..+1 veriler için mavi ↔ kırmızı,
+# ortada nötr gri. Turuncu kullanılmaz: ETH'nin seri rengiyle karışırdı.
+DIV_POS = "#3987e5" if DARK else "#2a78d6"
+DIV_NEG = "#e66767" if DARK else "#e34948"
+DIV_MID = "#383835" if DARK else "#f0efec"
+
+
+def rgba(hex_color: str, alpha: float) -> str:
+    """'#2a78d6' → 'rgba(42,120,214,0.1)' — seri renginde saydam dolgu için."""
+    h = hex_color.lstrip("#")
+    return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha})"
+
+
+# Streamlit bileşenlerine ince rötuş: metrik kartlarına yüzey + çerçeve,
+# böylece sayılar boşlukta yüzmez. Renkler yukarıdaki tema paletinden gelir.
+st.markdown(f"""<style>
+[data-testid="stMetric"] {{
+    background: {SURFACE}; border: 1px solid {GRID}; border-radius: 10px;
+    padding: 10px 14px;
+}}
+[data-testid="stMetric"] [data-testid="stMetricLabel"] p {{ color: {INK2}; }}
+</style>""", unsafe_allow_html=True)
 
 
 # ---------- veri ----------
@@ -132,9 +154,15 @@ def layout(fig: go.Figure, ytitle: str = "", height: int = 300, legend: bool = T
 
         paper_bgcolor=SURFACE, plot_bgcolor=SURFACE,
         font=dict(color=INK, size=12), hovermode="x unified",
+        hoverlabel=dict(bgcolor=SURFACE, bordercolor=GRID,
+                        font=dict(color=INK, size=12)),
+        barcornerradius=4,   # çubuk uçları hafif yuvarlak (veri ucu vurgusu)
         legend=dict(orientation="h", y=1.04, x=0, font=dict(color=INK2)),
         xaxis=dict(showgrid=False, linecolor=GRID, tickfont=dict(color=INK2),
-                   tickformat="%H:%M", hoverformat="%d.%m %H:%M"),
+                   tickformat="%H:%M", hoverformat="%d.%m %H:%M",
+                   # crosshair: imlecin olduğu dakikada dikey kılavuz çizgisi
+                   showspikes=True, spikemode="across", spikesnap="cursor",
+                   spikecolor=MUTED, spikethickness=1, spikedash="dot"),
         yaxis=dict(title=ytitle, gridcolor=GRID, zeroline=False,
                    tickfont=dict(color=INK2), title_font=dict(color=INK2)),
     )
@@ -145,7 +173,7 @@ def line(fig, g, col, name, color, width=2, dash=None, fmt=",.2f", fill=None):
     fig.add_trace(go.Scatter(
         x=g["t"], y=g[col], name=name, mode="lines",
         line=dict(color=color, width=width, dash=dash), fill=fill,
-        fillcolor="rgba(128,128,128,0.10)" if fill else None,
+        fillcolor=rgba(color, 0.12) if fill else None,   # dolgu, çizginin saydam tonu
         hovertemplate="%{y:" + fmt + "}",
     ))
 
@@ -382,7 +410,8 @@ genel bir yöne gidiyor demektir; biri ayrışıyorsa o coin'e özel bir şey ol
         corr = piv.corr()
         fig = go.Figure(go.Heatmap(
             z=corr.values, x=corr.columns, y=corr.index, zmin=-1, zmax=1,
-            colorscale=[[0, "#d95926"], [0.5, "#383835" if DARK else "#f0efec"], [1, "#2a78d6"]],
+            xgap=3, ygap=3,   # hücreler arası yüzey boşluğu — ızgara okunur olsun
+            colorscale=[[0, DIV_NEG], [0.5, DIV_MID], [1, DIV_POS]],
             text=np.round(corr.values, 2), texttemplate="%{text}", textfont=dict(color=INK),
             hovertemplate="%{x} × %{y}: %{z:.2f}<extra></extra>", showscale=False))
         st.plotly_chart(layout(fig, height=260, legend=False), width="stretch", config=PLOTLY_CFG)
@@ -392,7 +421,7 @@ genel bir yöne gidiyor demektir; biri ayrışıyorsa o coin'e özel bir şey ol
 +1 → iki coin dakika dakika aynı yönde hareket ediyor; 0 → ilişkisiz; −1 → ters.
 Kripto piyasasında BTC-ETH genelde 0.6–0.9 arası çıkar. Değer düşüyorsa
 coin'ler birbirinden kopuyor (haber, coin'e özel olay). Renk: mavi = pozitif,
-turuncu = negatif, gri = sıfıra yakın.
+kırmızı = negatif, gri = sıfıra yakın (kutuplu veri için standart diverging skala).
 """)
 
     # --- özet istatistik tablosu ---
@@ -562,7 +591,7 @@ piyasaya ani ilgi var (haber, likidasyon dalgası). Anomaliler sekmesindeki `z_t
     with c4:
         st.subheader("Ortalama işlem büyüklüğü ($)")
         fig = go.Figure()
-        line(fig, g, "avg_trade_usd", "ort. işlem $", col, width=2, fmt="$,.0f")
+        line(fig, g, "avg_trade_usd", "ort. işlem $", col, width=2, fmt="$,.0f", fill="tozeroy")
         st.plotly_chart(layout(fig, "USD", legend=False), width="stretch", config=PLOTLY_CFG)
         explain("İşlem büyüklüğü", """
 **Formül:** `hacim_usd / işlem_sayısı`
@@ -932,7 +961,7 @@ if section == "ML Anomali":
     st.subheader("Anomali skoru zaman serisi")
     thr_line = g.loc[g.if_flag, "if_score"].min() if not flagged.empty else None
     fig = go.Figure()
-    line(fig, g, "if_score", "anomali skoru", col, width=2, fmt=".3f")
+    line(fig, g, "if_score", "anomali skoru", col, width=2, fmt=".3f", fill="tozeroy")
     if thr_line is not None and pd.notna(thr_line):
         fig.add_hline(y=thr_line, line=dict(color=NEG, width=1, dash="dot"),
                       annotation_text=f"eşik ≈ {thr_line:.3f}", annotation_font_color=INK2)
