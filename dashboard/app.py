@@ -743,28 +743,41 @@ if section == "ML Anomali":
     st.subheader(f"{sym_ml} fiyat ve ML anomalileri")
     fig = go.Figure()
     line(fig, g, "avg_price", "ortalama fiyat", col, width=2.5)
-    zan = g[g.z_ret.abs() >= 2]
-    if not zan.empty:
-        fig.add_trace(go.Scatter(x=zan["t"], y=zan["avg_price"], mode="markers", name="z-skor (|z|≥2)",
+    # üç ayrı iz: yalnız z-skor, yalnız IF, her ikisi — çakışan dakikada işaretler
+    # üst üste binip birbirini gizlemesin diye "her ikisi" kendi sembolünü alır
+    zmask = g.z_ret.abs() >= 2
+    zonly, ifonly, both_pts = g[zmask & ~g.if_flag], g[g.if_flag & ~zmask], g[zmask & g.if_flag]
+    if not zonly.empty:
+        fig.add_trace(go.Scatter(x=zonly["t"], y=zonly["avg_price"], mode="markers", name="yalnız z-skor (|z|≥2)",
                                  marker=dict(color=WARN, size=9, symbol="diamond",
                                              line=dict(color=SURFACE, width=1.5)),
-                                 hovertemplate="z=%{customdata:+.1f}σ", customdata=zan["z_ret"]))
-    if not flagged.empty:
-        fig.add_trace(go.Scatter(x=flagged["t"], y=flagged["avg_price"], mode="markers",
-                                 name="Isolation Forest",
+                                 hovertemplate="z=%{customdata:+.1f}σ", customdata=zonly["z_ret"]))
+    if not ifonly.empty:
+        fig.add_trace(go.Scatter(x=ifonly["t"], y=ifonly["avg_price"], mode="markers",
+                                 name="yalnız Isolation Forest",
                                  marker=dict(color=NEG, size=12, symbol="x-thin",
                                              line=dict(color=NEG, width=2.5)),
-                                 hovertemplate="skor %{customdata:.3f}", customdata=flagged["if_score"]))
+                                 hovertemplate="skor %{customdata:.3f}", customdata=ifonly["if_score"]))
+    if not both_pts.empty:
+        fig.add_trace(go.Scatter(x=both_pts["t"], y=both_pts["avg_price"], mode="markers",
+                                 name="her ikisi (hemfikir)",
+                                 marker=dict(color=POS, size=15, symbol="star",
+                                             line=dict(color=SURFACE, width=1.5)),
+                                 customdata=np.stack([both_pts["z_ret"], both_pts["if_score"]], axis=1),
+                                 hovertemplate="z=%{customdata[0]:+.1f}σ · skor %{customdata[1]:.3f}"))
     fig.update_layout(uirevision=sym_ml)
     st.plotly_chart(layout(fig, "USD", height=380), width="stretch", config=PLOTLY_CFG)
     explain("İşaretler nasıl okunur?", """
-- **Sarı elmas**: z-skor kuralının işaretlediği dakika (yalnızca getiri serisine bakar).
-- **Kırmızı çarpı**: Isolation Forest'ın işaretlediği dakika (5 özelliğe birlikte bakar).
-- İkisi üst üsteyse iki yöntem hemfikir → en güvenilir sinyal.
+- **Sarı elmas**: yalnız z-skor işaretlemiş (getiri, önceki 30 dk'ya göre sıra dışı).
+- **Kırmızı çarpı**: yalnız Isolation Forest işaretlemiş (5 özelliğin kombinasyonu,
+  seçili aralığın geneline göre sıra dışı).
+- **Yeşil yıldız**: iki yöntem **hemfikir** → en güvenilir sinyal. Genelde büyük piyasa
+  olaylarında görülür (ör. sert düşüş dakikası üç coin'de birden yıldızlanır).
 - **Yalnız kırmızı çarpı** en ilginç durumdur: getiri tek başına normal ama örneğin
-  hacim + işlem büyüklüğü + salınım kombinasyonu tuhaf. Z-skor bunu göremez.
-- Yalnız sarı elmas: model o sapmayı popülasyonun geneline göre yeterince nadir bulmamış
-  (contamination oranını artırırsan model daha fazla dakikayı işaretler).
+  hacim + işlem büyüklüğü + salınım birlikte tuhaf (balina girişi, dakika içi savaş,
+  aşırı sessizlik). Z-skor bunları göremez.
+- Yalnız sarı elmas: z-skora göre yerel bir sapma var ama aralığın geneline göre nadir
+  değil — tipik örnek: çok sakin yarım saatin ortasındaki minik kıpırtı.
 """)
 
     # --- skor zaman serisi ---
